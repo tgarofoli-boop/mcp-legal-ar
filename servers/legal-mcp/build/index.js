@@ -4,7 +4,6 @@ import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextpro
 import { spawn, execSync } from "child_process";
 import * as readline from "readline";
 import * as path from "path";
-import * as fs from "fs";
 import { fileURLToPath } from "url";
 
 // ---------------------------------------------------------------------------
@@ -17,32 +16,6 @@ const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "..", "..", "..");          // raiz del repo
 const LEGAL_MCP = path.join(ROOT, "servers", "legal-mcp");
 const SAIJ_DIR  = path.join(ROOT, "servers", "saij-mcp");
-
-// ---------------------------------------------------------------------------
-// Credenciales por archivo .env (opcional, mismo formato que el resto del stack):
-// un KEY=VALUE por linea en <repo>/.env (o servers/legal-mcp/.env). Sirve para no
-// tener que editar el JSON de Claude Desktop. Solo el conector MEV y el modo
-// credenciales del Portal PJN lo usan (MEV_USUARIO/MEV_CLAVE, PJN_USER/PJN_PASS,
-// etc.). Las variables ya presentes en el entorno (JSON "env") tienen prioridad.
-// El .env esta en .gitignore: nunca se sube al repo.
-// ---------------------------------------------------------------------------
-function cargarEnvFile(p) {
-    try {
-        if (!fs.existsSync(p)) return;
-        for (const linea of fs.readFileSync(p, "utf8").split(/\r?\n/)) {
-            const m = linea.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-            if (!m) continue; // ignora comentarios (#...) y lineas vacias
-            let v = m[2];
-            if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
-            if (process.env[m[1]] === undefined) process.env[m[1]] = v;
-        }
-        process.stderr.write(`[mcp-legal-ar] credenciales cargadas de ${p}\n`);
-    } catch (e) {
-        process.stderr.write(`[mcp-legal-ar] no se pudo leer ${p}: ${e.message}\n`);
-    }
-}
-cargarEnvFile(process.env.MCP_LEGAL_ENV_FILE || path.join(ROOT, ".env"));
-cargarEnvFile(path.join(LEGAL_MCP, ".env"));
 // process.execPath puede apuntar a una ruta inexistente en nvm/fnm;
 // buscamos node en PATH como fallback seguro.
 function resolveNode() {
@@ -73,15 +46,6 @@ const TIMEOUTS = {
     // portalpjn HITL: arranque de Chromium + login del usuario en SSO +
     // posible reload para renovar token.
     portalpjn: 90000,
-    // juscaba: descargas binarias de sentencias, y el auto-login miBA (arranque de
-    // Chromium + login federado + redirect) que la primera vez puede pasar los 60s.
-    juscaba:  90000,
-    // csjn: flujo stateful de 3 pasos (GET consulta + POST buscar + GET paginar)
-    // y, segun maxResultados, varias paginas encadenadas. Tope holgado.
-    csjn:     45000,
-    // mev: ASP con login por form + sesion por cookie + parseo HTML de listados
-    // paginados. Login + POSLoguin + consulta encadenados; tope holgado.
-    mev:      60000,
 };
 
 // ---------------------------------------------------------------------------
@@ -120,41 +84,7 @@ const CONNECTORS = [
     // logueado + PDF por evento, via API REST api.pjn.gov.ar capturada en vivo
     // (docs/portalpjn-api.md). Login SIEMPRE del usuario (HITL, SSO Keycloak).
     { prefix: "portalpjn",    command: NODE, args: [path.join(LEGAL_MCP, "build", "portalpjn.js")],    cwd: LEGAL_MCP },
-    // juscaba NUEVO 22/6/26 (conector 13): API REST publica del EJE de la Justicia
-    // de la Ciudad (eje.juscaba.gob.ar). Sin login ni captcha. 12 tools, validado
-    // 7/7 contra la API real (ver RECON_JUSCABA_2026-06-22.md).
-    { prefix: "juscaba",      command: NODE, args: [path.join(LEGAL_MCP, "build", "juscaba.js")],      cwd: LEGAL_MCP },
-    // csjn NUEVO 24/6/26 (conector 14): base de Sumarios de la Secretaria de
-    // Jurisprudencia de la CSJN (sjconsulta.csjn.gov.ar). Fetch directo con
-    // cookies de sesion (flujo stateful de 3 pasos: consulta -> buscar ->
-    // paginarSumarios). Pasa el WAF via stack TLS nativo de Node/Windows.
-    // 3 tools. Recon en vivo 24/06/2026 (ver RECON_CSJN_2026-06-24.md).
-    { prefix: "csjn",         command: NODE, args: [path.join(LEGAL_MCP, "build", "csjn.js")],         cwd: LEGAL_MCP },
-    // mev NUEVO jul-2026 (conector 15): Mesa de Entradas Virtual de la SCBA
-    // (mev.scba.gov.ar), consulta de EXPEDIENTES de la Provincia de Buenos Aires.
-    // ASP con login por form + sesion por cookie; parseo HTML con cheerio. REQUIERE
-    // credenciales del abogado por env (MEV_USUARIO/MEV_CLAVE/MEV_DEPTO_REGISTRADO).
-    // Fuero penal/familia: reservados, via set 'Lista de Causas con AUTORIZACION'.
-    // Distinto de `scba` (jurisprudencia) y `juba` (jurisprudencia bonaerense).
-    { prefix: "mev",          command: NODE, args: [path.join(LEGAL_MCP, "build", "mev.js")],          cwd: LEGAL_MCP },
 ];
-
-// ---------------------------------------------------------------------------
-// Seleccion de conectores (MCP_LEGAL_CONNECTORS)
-// ---------------------------------------------------------------------------
-// Los 15 conectores exponen ~220 tools. Algunos clientes MCP truncan la lista
-// cuando un servidor expone demasiadas: el sintoma es que "faltan siempre las
-// mismas" tools en el chat aunque el log diga que cargaron bien.
-// Con esta variable, cada abogado levanta solo los conectores de su practica:
-//   MCP_LEGAL_CONNECTORS=infoleg,juba,saij,csjn
-// Va en el .env de la raiz o en el bloque "env" de claude_desktop_config.json.
-// Sin la variable (o vacia) se levantan los 15, como siempre.
-const SOLO = (process.env.MCP_LEGAL_CONNECTORS || "")
-    .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
-const DESCONOCIDOS = SOLO.filter((p) => !CONNECTORS.some((c) => c.prefix === p));
-const CONNECTORS_ACTIVOS = SOLO.length
-    ? CONNECTORS.filter((c) => SOLO.includes(c.prefix))
-    : CONNECTORS;
 
 class ChildMcpClient {
     prefix;
@@ -315,46 +245,20 @@ class ChildMcpClient {
 }
 
 // ---------------------------------------------------------------------------
-// Directiva operativa: el hub la expone como `instructions` del server MCP y el
-// cliente (ej. Claude Desktop) la surfacea al modelo al conectar. Corta a
-// proposito. Guia completa: docs/busqueda-jurisprudencia-doctrina.md
-// ---------------------------------------------------------------------------
-const DIRECTIVA_OPERATIVA = [
-    "Directiva de uso profesional (mcp-legal-ar). Fuentes juridicas argentinas para asistir al abogado; no reemplazan su revision.",
-    "- No afirmar nada que no surja de una consulta verificada a estas fuentes. No inventar ni completar citas, fechas, salas ni caratulas.",
-    "- Jurisprudencia: citar solo tras recuperar y leer el fallo completo, no el sumario. Distinguir holding de obiter y mayoria de disidencia. Verificar firmeza: si esta recurrido, es criterio, no cosa juzgada.",
-    "- Doctrina: la ficha bibliografica no es la obra leida. Si solo consta la referencia (autor, titulo, editorial), no se usa como fundamento hasta leer el texto.",
-    "- Normas: verificar vigencia. Nacional -> InfoLEG; Provincia de Buenos Aires -> NormativaPBA; otra provincia sin conector -> NO VERIFICADO.",
-    "- Citas provinciales: incluir el Departamento Judicial.",
-    "- Separar datos extraidos de inferencias. Marcar dudas y fuentes caidas como NO VERIFICADO; el silencio de una herramienta no es 'sin novedades'.",
-    "- Estado de confianza de cada dato del borrador: VERIFICADO | REFERENCIA VERIFICADA (ficha sin texto leido) | INFERIDO | NO VERIFICADO (PARCIAL) | NO VERIFICADO | CONFLICTO.",
-    "- Anonimizar datos personales antes de resumir PDFs de expedientes.",
-    "- No redactar la conclusion profesional final: entregar un borrador revisable por el abogado.",
-    "Directiva operativa completa y metodologia (estados de confianza, verificacion minima, matriz de omisiones, anonimizacion, registro): ver docs/directiva-operativa.md y docs/busqueda-jurisprudencia-doctrina.md.",
-].join("\n");
-
-// ---------------------------------------------------------------------------
 // Servidor principal
 // ---------------------------------------------------------------------------
 async function main() {
     const server = new Server(
         { name: "mcp-legal-ar", version: "2.1.0" },
-        { capabilities: { tools: {} }, instructions: DIRECTIVA_OPERATIVA }
+        { capabilities: { tools: {} } }
     );
 
     process.stderr.write("[mcp-legal-ar] iniciando conectores...\n");
     process.stderr.write(`[mcp-legal-ar] ROOT: ${ROOT}\n`);
-    if (SOLO.length) {
-        process.stderr.write(`[mcp-legal-ar] MCP_LEGAL_CONNECTORS activo: ${CONNECTORS_ACTIVOS.map((c) => c.prefix).join(", ") || "(ninguno)"}\n`);
-        if (DESCONOCIDOS.length)
-            process.stderr.write(`[mcp-legal-ar] AVISO: prefijos desconocidos en MCP_LEGAL_CONNECTORS, se ignoran: ${DESCONOCIDOS.join(", ")}\n`);
-        if (!CONNECTORS_ACTIVOS.length)
-            process.stderr.write(`[mcp-legal-ar] AVISO: ningun conector coincide; revisar MCP_LEGAL_CONNECTORS (prefijos validos: ${CONNECTORS.map((c) => c.prefix).join(", ")})\n`);
-    }
 
     const clients = [];
     await Promise.allSettled(
-        CONNECTORS_ACTIVOS.map(async (cfg) => {
+        CONNECTORS.map(async (cfg) => {
             const client = new ChildMcpClient(cfg.prefix, cfg);
             try {
                 await client.initialize();

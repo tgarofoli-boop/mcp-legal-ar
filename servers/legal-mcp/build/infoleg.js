@@ -1074,28 +1074,11 @@ async function fetchCodigoSubdocs(idNorma, tipoTexto = "actualizado") {
         if (!/\.html?$/i.test(href))
             return;
         const key = href.toLowerCase();
-        // Un sub-documento puede estar enlazado dos veces: como link suelto con texto
-        // generico (ej. "SANCION LEY N° 22.415") y dentro de una fila de tabla con el
-        // titulo real (ej. "Titulo Preliminar | Disposiciones generales | arts. 1 a 16").
-        // La fila describe mejor la seccion, asi que se prefiere su label.
-        const $row = $(a).closest("tr");
-        const inRow = $row.length > 0;
-        let label;
-        if (inRow) {
-            const cells = $row.find("td, th").map((_, c) => normalizeText($(c).text())).get().filter(Boolean);
-            label = cells.join(" - ");
-        }
-        label = label || normalizeText($(a).text()) || href.replace(/\.html?$/i, "");
-        if (seen.has(key)) {
-            const prev = entries.find((e) => e.file.toLowerCase() === key);
-            if (prev && inRow && !prev.inRow) {
-                prev.label = label;
-                prev.inRow = true;
-            }
+        if (seen.has(key))
             return;
-        }
         seen.add(key);
-        entries.push({ label, file: href, seccion: href.replace(/\.html?$/i, ""), url: dir + href, inRow });
+        const label = normalizeText($(a).text()) || href.replace(/\.html?$/i, "");
+        entries.push({ label, file: href, seccion: href.replace(/\.html?$/i, ""), url: dir + href });
     });
     // Un articulado normal repite "ARTICULO N" muchas veces; un índice casi nunca.
     const articuloCount = ($.root().text().match(/ART[IÍ]CULO\s+\d/gi) || []).length;
@@ -1268,27 +1251,23 @@ export function registerAllTools(server) {
         pagina: z.number().optional().default(1).describe("Página de resultados")
     }, async (args) => {
         try {
-            // Norma por número + tipo o año: el usuario quiere una norma puntual, no una
-            // búsqueda de texto. El Solr ordena por fecha y entierra la norma vieja entre
-            // novedades; la búsqueda estructurada la resuelve. (Fix T2/T3.)
-            // numeroNorma explícito es el disparador más fuerte; si no viene, un criterio
-            // puramente numérico también identifica la norma. Cualquiera de los dos sirve.
+            // Criterio puramente numérico + tipo o año: el usuario quiere una norma
+            // por número (ej. "4352" + Resolución + 2018), no una búsqueda de texto.
+            // El Solr ordena por fecha y entierra la norma vieja entre novedades; la
+            // búsqueda estructurada la resuelve. (Fix T3.)
             const criterioNumerico = /^\d{1,6}$/.test(args.criterio.trim());
-            const numeroExplicito = args.numeroNorma
-                ? String(args.numeroNorma).trim()
-                : (criterioNumerico ? args.criterio.trim() : null);
-            if (numeroExplicito && (args.tipoNorma || args.anioNorma)) {
+            if (criterioNumerico && (args.tipoNorma || args.anioNorma) && !args.numeroNorma) {
                 try {
                     const est = await searchNormativaOfficial({
                         jurisdiccion: "nacional",
                         tipoNorma: args.tipoNorma,
-                        numeroNorma: numeroExplicito,
+                        numeroNorma: args.criterio.trim(),
                         anioNorma: args.anioNorma,
                         pagina: args.pagina || 1
                     });
                     if (est.results.length > 0) {
                         let output = `# Resultados de Búsqueda en InfoLEG\n\n`;
-                        output += `Se encontraron **${est.results.length}** resultados para ${args.tipoNorma || "norma"} N° ${numeroExplicito}${args.anioNorma ? `/${args.anioNorma}` : ""} (búsqueda estructurada):\n\n`;
+                        output += `Se encontraron **${est.results.length}** resultados para ${args.tipoNorma || "norma"} N° ${args.criterio.trim()}${args.anioNorma ? `/${args.anioNorma}` : ""} (búsqueda estructurada):\n\n`;
                         est.results.forEach((r, idx) => {
                             output += `### ${idx + 1}. ${r.titulo || r.normativa}\n`;
                             if (r.id)
@@ -1454,7 +1433,6 @@ export function registerAllTools(server) {
                 indice.entries.forEach((e) => {
                     out += `- **${e.label}** — \`seccion="${e.seccion}"\` — [texto](${e.url})\n`;
                 });
-                out += `\n> ⚠️ **Vigencia:** los codigos se reforman seguido y el texto consolidado de InfoLEG puede ir atras de las ultimas reformas. Antes de citar un articulo, verifica las normas modificatorias posteriores en https://www.argentina.gob.ar/normativa/nacional/${idNorma}/normas-modifican\n`;
                 return { content: [{ type: "text", text: out }] };
             }
         }
@@ -1471,9 +1449,6 @@ export function registerAllTools(server) {
             output += `* **Fuente Oficial:** [Enlace de descarga](${fetchedUrl})\n`;
             if (advertencia)
                 output += `\n> ⚠️ **Advertencia:** ${advertencia}\n`;
-            if (tipoTexto === "actualizado")
-                output += `\n> ⚠️ **Vigencia:** el texto "actualizado" de InfoLEG se consolida manualmente y puede NO incluir las reformas mas recientes (los codigos muy reformados, como el CCyCN, suelen ir atras). Antes de citar un articulo, verifica las normas modificatorias posteriores en https://www.argentina.gob.ar/normativa/nacional/${idNorma}/normas-modifican\n`;
-            output += `\n> ⚠️ **Vigencia temporal (ratione temporis):** este es el texto ${tipoTexto === "original" ? "ORIGINAL, a la sancion" : "ACTUAL"}, no necesariamente el que regia al momento de los hechos de tu caso. Si los hechos son anteriores a alguna reforma, la norma aplicable puede ser la version previa (art. 7 CCyC). Usa "listar_modificatorias" con fechaDesde = fecha de los hechos para ver que se reformo despues.\n`;
             output += `\n## Cuerpo Normativo\n\n${cleanText}`;
             return { content: [{ type: "text", text: output }] };
         }
@@ -1508,10 +1483,6 @@ export function registerAllTools(server) {
             `1. **Selección de Variante:** Descarga y limpia el texto original o el texto consolidado actualizado.\n` +
             `2. **Rutas directas oficiales:** Genera automáticamente la ubicación del archivo en el portal del Estado.\n` +
             `3. **Lectura manual:** Permite ingresar el texto copiado de la norma en \`textoHtmlManual\` para análisis inmediato sin conexión al portal.\n\n` +
-            `## Vigencia y actualizacion (importante)\n` +
-            `- El texto "actualizado" de InfoLEG es una consolidacion MANUAL: puede no incluir las reformas mas recientes. En codigos muy reformados (ej. el CCyCN, que InfoLEG declara modificado/complementado por decenas de normas) el atraso es esperable.\n` +
-            `- No trates el texto actualizado como el texto vigente garantizado. Antes de citar un articulo, verifica las modificatorias posteriores en \`argentina.gob.ar/normativa/nacional/{idNorma}/normas-modifican\` y, para lo mas reciente, cruzalo con el Boletin Oficial (conector BORA) o con SAIJ.\n` +
-            `- El texto "original" es la publicacion inicial, sin reformas: util para ver el estado a la sancion, no el vigente.\n\n` +
             `## Aviso de Responsabilidad\n` +
             `Este conector es una herramienta tecnológica automatizada y no representa asesoramiento jurídico formal.`;
         return { content: [{ type: "text", text: output }] };
@@ -1746,90 +1717,6 @@ export function registerAllTools(server) {
                 return { content: [{ type: "text", text: error.message }], isError: true };
             }
             return { content: [{ type: "text", text: `Error al obtener metadatos: ${error.message}` }], isError: true };
-        }
-    });
-    server.tool("listar_modificatorias", "Lista las normas que MODIFICAN o COMPLEMENTAN una norma, de la mas reciente a la mas antigua. Sirve para ver que reformas podrian NO estar todavia en el texto 'actualizado' de InfoLEG (que se consolida a mano). El idNorma lo dan buscar_normativa u obtener_metadatos_norma (ej. 235975 = CCyCN, Ley 26.994).", {
-        idNorma: stringOrNumber.describe("ID de la norma en InfoLEG/argentina.gob.ar (ej. '235975')."),
-        pagina: z.number().optional().default(1).describe("Pagina de resultados (aprox. 50 por pagina). Default 1. Se ignora si se usa fechaDesde."),
-        soloLeyesYDecretos: z.boolean().optional().default(false).describe("Si true, filtra a Leyes, Decretos y DNU (las que suelen reformar el articulado del codigo), descartando resoluciones y disposiciones administrativas."),
-        fechaDesde: z.string().optional().describe("Filtra a las reformas publicadas en el Boletin DESDE esta fecha (dd-mm-yyyy, dd/mm/yyyy o yyyy-mm-dd). Poné la fecha de los hechos del caso: te lista lo que se reformo despues (clave para la vigencia temporal / art. 7 CCyC). Recorre las paginas necesarias.")
-    }, async (args) => {
-        try {
-            const parseFecha = (s) => {
-                if (!s) return null;
-                const t = String(s).trim();
-                let m = t.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
-                if (m) return Number(m[1]) * 10000 + Number(m[2]) * 100 + Number(m[3]);
-                m = t.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
-                if (m) return Number(m[3]) * 10000 + Number(m[2]) * 100 + Number(m[1]);
-                return null;
-            };
-            const parseRows = (html) => {
-                const $ = cheerio.load(html);
-                const rows = [];
-                $("table tr").each((_, tr) => {
-                    const tds = $(tr).find("td");
-                    if (tds.length < 3) return;
-                    const a = $(tds[0]).find("a").first();
-                    const norma = a.text().replace(/\s+/g, " ").trim();
-                    if (!norma) return;
-                    const href = a.attr("href") || "";
-                    const organismo = $(tds[0]).text().replace(a.text(), "").replace(/\s+/g, " ").trim();
-                    const fecha = $(tds[1]).text().replace(/\s+/g, " ").trim();
-                    const descripcion = $(tds[2]).text().replace(/\s+/g, " ").trim().slice(0, 220);
-                    rows.push({ norma, organismo, fecha, fechaNum: parseFecha(fecha), descripcion, url: href.startsWith("http") ? href : `${ARGENTINA_BASE_URL}${href}` });
-                });
-                return rows;
-            };
-            const baseUrl = `${ARGENTINA_BASE_URL}/normativa/nacional/norma-${args.idNorma}/normas-modifican`;
-            const desde = parseFecha(args.fechaDesde);
-            if (args.fechaDesde && !desde) {
-                return { content: [{ type: "text", text: `Fecha invalida: '${args.fechaDesde}'. Usá dd-mm-yyyy, dd/mm/yyyy o yyyy-mm-dd.` }], isError: true };
-            }
-
-            let items = [];
-            let paginasLeidas = 0;
-            if (desde) {
-                // Sorted desc: recorro paginas hasta que caen por debajo de la fecha.
-                for (let p = 0; p < 15; p++) {
-                    const rows = parseRows(await fetchOfficialHtml(baseUrl + (p > 0 ? `?page=${p}` : "")));
-                    paginasLeidas++;
-                    if (!rows.length) break;
-                    items.push(...rows);
-                    const minFecha = Math.min(...rows.map((r) => r.fechaNum || Infinity));
-                    if (minFecha < desde) break;
-                }
-                items = items.filter((i) => i.fechaNum && i.fechaNum >= desde);
-            } else {
-                const page = Math.max(1, Number(args.pagina) || 1);
-                items = parseRows(await fetchOfficialHtml(baseUrl + (page > 1 ? `?page=${page - 1}` : "")));
-                paginasLeidas = 1;
-            }
-
-            const filtrados = args.soloLeyesYDecretos
-                ? items.filter((i) => /^(ley|decreto|dnu)\b/i.test(i.norma))
-                : items;
-            if (!filtrados.length) {
-                return { content: [{ type: "text", text: `No se encontraron modificatorias${desde ? ` posteriores a ${args.fechaDesde}` : ""}${args.soloLeyesYDecretos ? " (leyes/decretos)" : ""} para la norma ${args.idNorma}.\nRevisá directamente: ${baseUrl}` }] };
-            }
-
-            let out = `# Normas que modifican/complementan (InfoLEG ${args.idNorma})\n\n`;
-            out += desde
-                ? `Reformas publicadas DESDE ${args.fechaDesde}: ${filtrados.length}${args.soloLeyesYDecretos ? " (solo Leyes/Decretos/DNU)" : ""}. De la mas reciente a la mas antigua.\n\n`
-                : `Pagina ${Math.max(1, Number(args.pagina) || 1)}. ${filtrados.length} resultado(s)${args.soloLeyesYDecretos ? " (solo Leyes/Decretos/DNU)" : ""}, de la mas reciente a la mas antigua.\n\n`;
-            out += desde
-                ? `> ⚠️ **Vigencia temporal:** si los hechos de tu caso son de ${args.fechaDesde}, estas reformas son POSTERIORES. Para los articulos afectados, el texto aplicable puede ser el ANTERIOR a estas reformas (art. 7 CCyC), no el actual.\n\n`
-                : `> ⚠️ Estas reformas pueden NO estar incorporadas al texto "actualizado" de InfoLEG. Verifica el articulo puntual contra la norma modificatoria antes de citar.\n\n`;
-            filtrados.forEach((i) => {
-                out += `- **${i.norma}** — B.O. ${i.fecha} — ${i.organismo}\n`;
-                if (i.descripcion) out += `  ${i.descripcion}\n`;
-                out += `  [Ver norma](${i.url})\n`;
-            });
-            out += `\n*Fuente: ${baseUrl}${paginasLeidas > 1 ? ` (${paginasLeidas} paginas leidas)` : ""}*`;
-            return { content: [{ type: "text", text: out }] };
-        }
-        catch (error) {
-            return { content: [{ type: "text", text: `Error al listar modificatorias: ${error.message}` }], isError: true };
         }
     });
     server.tool("obtener_urls_norma", "Construye URLs oficiales utiles para una norma: visor historico, texto original, texto actualizado y rutas de Argentina.gob.ar si se provee URL.", {
