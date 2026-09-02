@@ -1,5 +1,6 @@
 ﻿FROM node:20-slim
 WORKDIR /app
+ENV PUPPETEER_SKIP_DOWNLOAD=true
 COPY package*.json ./
 RUN npm install --production
 COPY servers/legal-mcp/package*.json ./servers/legal-mcp/
